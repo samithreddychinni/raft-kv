@@ -28,7 +28,7 @@ func (s *Store) GetAll() map[string]string {
 
 func (s *Store) Get(key string) (string, bool) {
 	s.mu.RLock()
-	defer s.mu.RLock()
+	defer s.mu.RUnlock()
 	val, ok := s.items[key]
 	return val, ok
 }
