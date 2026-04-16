@@ -59,12 +59,19 @@ func (s *Server) handleSet(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid request body", http.StatusBadRequest)
 		return
 	}
-	s.store.Set(key, data.Value)
+	if err := s.store.Set(key, data.Value); err != nil {
+		http.Error(w, "failed to persist write", http.StatusServiceUnavailable)
+		return
+	}
 	w.WriteHeader(http.StatusCreated)
 }
 
 func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
 	key := r.PathValue("key")
-	s.store.Delete(key)
+	if err := s.store.Delete(key); err != nil {
+		http.Error(w, "failed to persist delete", http.StatusServiceUnavailable)
+		return
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
+
