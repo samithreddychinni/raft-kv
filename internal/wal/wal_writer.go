@@ -1,8 +1,4 @@
 // write path: encodes entries and appends them durably to the log file
-//
-// failure safety:
-// 1)crash during append i.e, entry is partially written; magic+checksum mismatch detected at replay and entry is skipped.
-// 2)crash after wal write but before memory apply i.e, replay re-applies the entry safely (idempotent for SET; harmless re-delete for DELETE).
 package wal
 
 import (
@@ -40,31 +36,45 @@ func (w *WAL) AppendDelete(key string) error {
 }
 
 // append encodes and durably writes one WAL entry.
-// wire format:- magic(4B), opcode(1B), key_len(4B), val_len(4B), key(key_len B), val(val_len B), crc32(4B)
-// the checksum covers everything after the magic: opcode through val.
+// header is written as a single 16B buffer; checksum covers header[4:16] + key + val.
 func (w *WAL) append(op Opcode, key, value string) error {
 	kLen := uint32(len(key))
 	vLen := uint32(len(value))
 
-	payloadSize := 1 + 4 + 4 + int(kLen) + int(vLen)
-	payload := make([]byte, 0, payloadSize)
-	payload = append(payload, byte(op))
-	payload = binary.LittleEndian.AppendUint32(payload, kLen)
-	payload = binary.LittleEndian.AppendUint32(payload, vLen)
-	payload = append(payload, key...)
-	payload = append(payload, value...)
-	checksum := crc32.ChecksumIEEE(payload)
+	// build the 16B header; bytes 14-15 are zeroed by make() — reserved
+	var hdr [headerSize]byte
+	binary.LittleEndian.PutUint32(hdr[0:4], magic)
+	binary.LittleEndian.PutUint32(hdr[4:8], kLen)
+	binary.LittleEndian.PutUint32(hdr[8:12], vLen)
+	hdr[12] = byte(op)
+	hdr[13] = currentVersion
+	// hdr[14:16] == 0x00 (reserved)
 
-	entry := make([]byte, 0, 4+payloadSize+4)
-	entry = binary.LittleEndian.AppendUint32(entry, magic)
-	entry = append(entry, payload...)
-	entry = binary.LittleEndian.AppendUint32(entry, checksum)
+	// checksum over header[4:16] + key + val
+	h := crc32.NewIEEE()
+	h.Write(hdr[4:16])
+	h.Write([]byte(key))
+	h.Write([]byte(value))
+	checksum := h.Sum32()
+
+	var crcBuf [4]byte
+	binary.LittleEndian.PutUint32(crcBuf[:], checksum)
 
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
-	if _, err := w.file.Write(entry); err != nil {
+	if _, err := w.file.Write(hdr[:]); err != nil {
+		return err
+	}
+	if _, err := w.file.Write([]byte(key)); err != nil {
+		return err
+	}
+	if _, err := w.file.Write([]byte(value)); err != nil {
+		return err
+	}
+	if _, err := w.file.Write(crcBuf[:]); err != nil {
 		return err
 	}
 	return w.file.Sync()
 }
+

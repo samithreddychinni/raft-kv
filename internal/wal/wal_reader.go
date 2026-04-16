@@ -16,9 +16,10 @@ var (
 )
 
 type Entry struct {
-	Op    Opcode
-	Key   string
-	Value string
+	Op      Opcode
+	Version uint8
+	Key     string
+	Value   string
 }
 
 // ReadEntry decodes one entry from r, validates magic and checksum.
@@ -36,27 +37,24 @@ func ReadEntry(r io.Reader) (*Entry, error) {
 		return nil, ErrInvalidMagic //corrupt/partial entries
 	}
 
-	op := Opcode(hdr[4])
-	kLen := binary.LittleEndian.Uint32(hdr[5:9])
-	vLen := binary.LittleEndian.Uint32(hdr[9:13])
+	kLen := binary.LittleEndian.Uint32(hdr[4:8])
+	vLen := binary.LittleEndian.Uint32(hdr[8:12])
+	op := Opcode(hdr[12])
+	version := hdr[13]
+	//hdr[14:16] reserved [IGNORED]
 
 	body := make([]byte, int(kLen)+int(vLen)+4) //+4 for checksum
 	if _, err := io.ReadFull(r, body); err != nil {
-		return nil, ErrShortRead
+		return nil, ErrShortRead //corrupt/partial entries
 	}
 
 	keyBytes := body[:kLen]
 	valBytes := body[kLen : kLen+vLen]
 	storedCRC := binary.LittleEndian.Uint32(body[kLen+vLen:])
 
-	//recompute checksum over payload.[same bytes written during append]
+	//recompute checksum over header[4:16] + key + val.[same bytes written during append]
 	h := crc32.NewIEEE()
-	h.Write([]byte{byte(op)})
-	var buf [4]byte
-	binary.LittleEndian.PutUint32(buf[:], kLen)
-	h.Write(buf[:])
-	binary.LittleEndian.PutUint32(buf[:], vLen)
-	h.Write(buf[:])
+	h.Write(hdr[4:16])
 	h.Write(keyBytes)
 	h.Write(valBytes)
 
@@ -65,8 +63,9 @@ func ReadEntry(r io.Reader) (*Entry, error) {
 	}
 
 	return &Entry{
-		Op:    op,
-		Key:   string(keyBytes),
-		Value: string(valBytes),
+		Op:      op,
+		Version: version,
+		Key:     string(keyBytes),
+		Value:   string(valBytes),
 	}, nil
 }
