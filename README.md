@@ -69,6 +69,6 @@ This is a learning project with planned phases:
 - Go 1.21+
 - Standard library (net/http, sync, encoding/json)
 
-## Motivation
+## Why ?
 
 I'm using this project to deeply understand distributed systems by building one from the ground up - rather than "vibe coding" solutions. The follow-up phase will include a Chaos Monkey-style failure simulator to test the system's resilience.
