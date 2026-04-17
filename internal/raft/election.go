@@ -23,8 +23,10 @@ func (n *RaftNode) startElection() {
 
 	// broadcast RequestVote in parallel; results handled by goroutines
 	args := RequestVoteArgs{
-		Term:        term,
-		CandidateID: n.id,
+		Term:         term,
+		CandidateID:  n.id,
+		LastLogIndex: n.lastLogIndex, //let peers check log completeness
+		LastLogTerm:  n.lastLogTerm,
 	}
 	body, err := encode(args)
 	if err != nil {

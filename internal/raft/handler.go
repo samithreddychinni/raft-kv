@@ -22,10 +22,18 @@ func (n *RaftNode) HandleRequestVote(args RequestVoteArgs) RequestVoteReply {
 		n.becomeFollower(args.Term)
 	}
 
+	// log completeness check: refuse to vote for a candidate whose
+	// log is less up-to-date than ours. Candidate log is "at least as up-to-date" if:
+	//   a) its LastLogTerm is higher, OR
+	//   b) same LastLogTerm and its LastLogIndex >= ours.
+	candidateLogOK := args.LastLogTerm > n.lastLogTerm ||
+		(args.LastLogTerm == n.lastLogTerm && args.LastLogIndex >= n.lastLogIndex)
+
 	// one vote per term: grant only if we have not voted yet (or voted for same candidate)
-	if n.votedFor == "" || n.votedFor == args.CandidateID {
+	// AND the candidate's log is at least as up-to-date as ours.
+	if (n.votedFor == "" || n.votedFor == args.CandidateID) && candidateLogOK {
 		n.votedFor = args.CandidateID
-		n.resetElectionTimer() // a real leader will appear soon reset timer
+		n.resetElectionTimer() // a real leader will appear soon; reset timer
 		reply.VoteGranted = true
 		reply.Term = n.currentTerm
 		log.Printf("[%s] granted vote → %s  term=%d", n.id, args.CandidateID, n.currentTerm)

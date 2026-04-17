@@ -114,8 +114,11 @@ All integers are little-endian. The four-byte fields are placed first so every `
 
 ## Known Limitations
 
-- **Clustering only (No Log Replication):** Nodes elect a leader, but the KV store state is not yet replicated. Writes are local to the leader.
-- **Persistence Gaps:** `currentTerm` and `votedFor` are in-memory only; they currently reset on restart.
+- **No Log Replication:** Nodes elect a leader, but KV store state is not yet replicated. Writes are local to the leader.
+- **Persistence Gaps:** `currentTerm` and `votedFor` are in-memory only; they reset on restart (§5.4 violation).
+- **Goroutine Leak on Dead Peers:** The leader spawns an unbounded goroutine per peer per heartbeat tick. If a peer is offline, goroutines pile up at ~20/sec blocked on `dialTimeout`. Will be fixed when connection pooling is added during log replication.
+- **No TCP Connection Pooling:** Every heartbeat opens a fresh TCP connection and re-initializes a `gob.Encoder`, incurring full TCP handshake and gob type-metadata overhead every 50ms. Will be replaced with persistent connections in the replication stage.
+- **Election Timer Race on Stop():** If the timer fires just before `Stop()` is called, the enqueued `onElectionTimeout` goroutine will still run after the node is stopped. Extremely unlikely in practice; a `stopped` guard will be added before the replication stage.
 - No authentication or security.
 
 ## Project Goals

@@ -48,6 +48,11 @@ type RaftNode struct {
 	state         RaftState
 	votes         int
 	electionTimer *time.Timer
+
+	// log metadata — updated on every append; used for the vote check.
+	// both are 0 while the log is empty (election-only phase).
+	lastLogIndex uint64
+	lastLogTerm  uint64
 }
 
 //NewRaftNode creates a raftnode that starts as a follower
