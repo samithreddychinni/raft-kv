@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/samithreddychinni/raftkv/internal/peer"
+	"github.com/samithreddychinni/raftkv/internal/raft"
 	"github.com/samithreddychinni/raftkv/internal/store"
 	"github.com/samithreddychinni/raftkv/server"
 )
@@ -15,27 +16,36 @@ import (
 func main() {
 	id := flag.String("id", "node1", "unique node ID")
 	httpAddr := flag.String("http", ":8080", "HTTP listen address")
-	peerAddr := flag.String("peer-addr", ":9001", "TCP address for peer 2 peer traffic")
-	peersFlag := flag.String("peers", "", "peers: id=addr,id=addr")
+	peerAddr := flag.String("peer-addr", ":9001", "TCP address for peer traffic")
+	raftAddr := flag.String("raft-addr", ":9101", "TCP address for Raft RPC traffic")
+	peersFlag := flag.String("peers", "", "peer list: id=peerAddr=raftAddr,...")
 	flag.Parse()
 
-	//parse peer list
-	var peers []peer.Peer
+	var peerNodes []peer.Peer
+	var raftPeers []raft.Peer
+
 	if *peersFlag != "" {
 		for _, entry := range strings.Split(*peersFlag, ",") {
-			parts := strings.SplitN(entry, "=", 2)
-			if len(parts) != 2 {
-				fmt.Fprintf(os.Stderr, "invalid peer entry: %q\n", entry)
+			// Format: id=peerAddr=raftAddr
+			parts := strings.SplitN(entry, "=", 3)
+			if len(parts) != 3 {
+				fmt.Fprintf(os.Stderr, "invalid peer entry (want id=peerAddr=raftAddr): %q\n", entry)
 				os.Exit(1)
 			}
-			peers = append(peers, peer.Peer{ID: parts[0], Addr: parts[1]})
+			peerNodes = append(peerNodes, peer.Peer{ID: parts[0], Addr: parts[1]})
+			raftPeers = append(raftPeers, raft.Peer{ID: parts[0], Addr: parts[2]})
 		}
 	}
 
-	//start peer node (listener + ping goroutines)
-	n := peer.NewNode(*id, *peerAddr, peers)
+	// start peer node (ping/pong health tracking)
+	n := peer.NewNode(*id, *peerAddr, peerNodes)
 	n.Start()
-	// each node gets one wal file for itself
+
+	// start Raft node (leader election + heartbeats)
+	rn := raft.NewRaftNode(*id, *raftAddr, raftPeers)
+	rn.Start()
+
+	// start key-value store backed by WAL
 	walPath := *id + ".wal"
 	s, err := store.NewStoreFromWAL(walPath)
 	if err != nil {
@@ -45,7 +55,7 @@ func main() {
 	defer s.Close()
 
 	srv := server.NewServer(s)
-	fmt.Printf("[%s] HTTP on %s | peer TCP on %s\n", *id, *httpAddr, *peerAddr)
+	fmt.Printf("[%s] HTTP=%s  peer=%s  raft=%s\n", *id, *httpAddr, *peerAddr, *raftAddr)
 	if err := http.ListenAndServe(*httpAddr, srv); err != nil {
 		fmt.Fprintf(os.Stderr, "server error: %v\n", err)
 	}
