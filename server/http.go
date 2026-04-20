@@ -2,8 +2,10 @@ package server
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 
+	"github.com/samithreddychinni/raftkv/internal/raft"
 	"github.com/samithreddychinni/raftkv/internal/store"
 )
 
@@ -13,12 +15,14 @@ type KVData struct {
 
 type Server struct {
 	store *store.Store
+	raft  *raft.RaftNode
 	mux   *http.ServeMux
 }
 
-func NewServer(store *store.Store) *Server {
+func NewServer(s *store.Store, rn *raft.RaftNode) *Server {
 	srv := &Server{
-		store: store,
+		store: s,
+		raft:  rn,
 		mux:   http.NewServeMux(),
 	}
 	srv.routes()
@@ -59,8 +63,14 @@ func (s *Server) handleSet(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid request body", http.StatusBadRequest)
 		return
 	}
-	if err := s.store.Set(key, data.Value); err != nil {
-		http.Error(w, "failed to persist write", http.StatusServiceUnavailable)
+	if !s.raft.IsLeader() {
+		w.Header().Set("X-Raft-Leader", s.raft.LeaderAddr())
+		http.Error(w, "not the leader", http.StatusServiceUnavailable)
+		return
+	}
+	cmd, _ := json.Marshal(store.Cmd{Op: "set", Key: key, Value: data.Value})
+	if err := s.raft.Propose(cmd); err != nil {
+		http.Error(w, fmt.Sprintf("propose failed: %v", err), http.StatusServiceUnavailable)
 		return
 	}
 	w.WriteHeader(http.StatusCreated)
@@ -68,8 +78,14 @@ func (s *Server) handleSet(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
 	key := r.PathValue("key")
-	if err := s.store.Delete(key); err != nil {
-		http.Error(w, "failed to persist delete", http.StatusServiceUnavailable)
+	if !s.raft.IsLeader() {
+		w.Header().Set("X-Raft-Leader", s.raft.LeaderAddr())
+		http.Error(w, "not the leader", http.StatusServiceUnavailable)
+		return
+	}
+	cmd, _ := json.Marshal(store.Cmd{Op: "delete", Key: key})
+	if err := s.raft.Propose(cmd); err != nil {
+		http.Error(w, fmt.Sprintf("propose failed: %v", err), http.StatusServiceUnavailable)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)

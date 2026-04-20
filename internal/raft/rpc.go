@@ -4,9 +4,9 @@ package raft
 //MsgType constants extend the peer transport's MsgType enum
 // values start at 10 to avoid collision with peer.MsGPing/MsgPong
 const (
-	MsgRequestVote      uint8 = 10
-	MsgRequestVoteReply uint8 = 11
-	MsgAppendEntries    uint8 = 12
+	MsgRequestVote  uint8 = 10
+	MsgRequestVoteReply  uint8 = 11
+	MsgAppendEntries  uint8 = 12
 	MsgAppendEntriesReply uint8 = 13
 )
 
@@ -27,23 +27,27 @@ type RequestVoteReply struct {
 	VoteGranted bool
 }
 
-// AppendEntriesArgs is sent by the Leader as a heartbeat [entries is empty]
-//or with log entries for replication here we only use it for heartbeats
+// AppendEntriesArgs is sent by the Leader as a heartbeat or with real log entries
 type AppendEntriesArgs struct {
-	Term     uint64
-	LeaderID string
-	//entries is empty for heartbeat RPCs
-	Entries []LogEntry
+	Term         uint64
+	LeaderID     string
+	PrevLogIndex uint64 // index of entry immediately before new ones
+	PrevLogTerm  uint64 // term of that entry
+	Entries      []LogEntry // empty slice = heartbeat
+	LeaderCommit uint64 // leader's current commitIndex
 }
 
-//LogEntry is a placeholder; log replication is a future plan
+//LogEntry is a single command in the replicated log
 type LogEntry struct {
+	Index   uint64
 	Term    uint64
-	Command []byte
+	Command []byte // opcode + key + value, encoded by the leader
 }
 
 //AppendEntriesReply lets the leader detect a higher term and step down
 type AppendEntriesReply struct {
 	Term    uint64
 	Success bool
+	ConflictIndex uint64 // first index of the conflicting term (fast catch-up hint)
+	ConflictTerm  uint64 // term at that index; 0 if follower log is too short
 }

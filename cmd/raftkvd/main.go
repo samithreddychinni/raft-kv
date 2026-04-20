@@ -54,7 +54,18 @@ func main() {
 	}
 	defer s.Close()
 
-	srv := server.NewServer(s)
+	srv := server.NewServer(s, rn)
+
+	// apply loop: drains committed Raft entries and applies them to the store.
+	// runs on both leader and follower same code path.
+	go func() {
+		for entry := range rn.ApplyCh() {
+			if err := s.Apply(entry); err != nil {
+				fmt.Fprintf(os.Stderr, "apply error: %v\n", err)
+			}
+		}
+	}()
+
 	fmt.Printf("[%s] HTTP=%s  peer=%s  raft=%s\n", *id, *httpAddr, *peerAddr, *raftAddr)
 	if err := http.ListenAndServe(*httpAddr, srv); err != nil {
 		fmt.Fprintf(os.Stderr, "server error: %v\n", err)

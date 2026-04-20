@@ -1,11 +1,13 @@
 package store
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"sync"
 
+	"github.com/samithreddychinni/raftkv/internal/raft"
 	"github.com/samithreddychinni/raftkv/internal/wal"
 )
 
@@ -120,3 +122,27 @@ func (s *Store) Close() error {
 	return s.log.Close()
 }
 
+// cmd is the command encoded inside a raft.LogEntry.Command
+// the HTTP handler encodes this apply decodes it
+type Cmd struct {
+	Op    string `json:"op"`    //"set"or"delete"
+	Key   string `json:"key"`
+	Value string `json:"value"` //empty for delete
+}
+
+// apply decodes a committed raft log entry and writes it to the store
+// called by the apply loop in main.go same code path for leader and follower
+func (s *Store) Apply(entry raft.LogEntry) error {
+	var cmd Cmd
+	if err := json.Unmarshal(entry.Command, &cmd); err != nil {
+		return fmt.Errorf("store: decode command: %w", err)
+	}
+	switch cmd.Op {
+	case "set":
+		return s.Set(cmd.Key, cmd.Value)
+	case "delete":
+		return s.Delete(cmd.Key)
+	default:
+		return fmt.Errorf("store: unknown op %q", cmd.Op)
+	}
+}

@@ -53,6 +53,23 @@ type RaftNode struct {
 	// both are 0 while the log is empty (election-only phase).
 	lastLogIndex uint64
 	lastLogTerm  uint64
+
+	// in-memory Raft log; index 0 is a zero-entry sentinel
+	raftLog []LogEntry
+
+	// replicated state machine indices
+	commitIndex uint64 // highest index known committed
+	lastApplied uint64 // highest index applied to the state machine
+
+	// apply channel: committed entries flow here for the store to consume
+	applyCh chan LogEntry
+
+	// leader-only: per-peer replication bookkeeping
+	nextIndex  map[string]uint64 // next log index to send to each peer
+	matchIndex map[string]uint64 // highest index confirmed replicated on each peer
+
+	// current known leader (may be empty if unknown)
+	leaderID string
 }
 
 //NewRaftNode creates a raftnode that starts as a follower
@@ -62,7 +79,10 @@ func NewRaftNode(id, addr string, peers []Peer) *RaftNode {
 		addr:  addr,
 		peers: peers,
 		state: Follower,
+		applyCh: make(chan LogEntry, 256),
 	}
+	n.initLog()
+	
 	//timer fires once then We restart it with a new random duration every time
 	n.electionTimer = time.AfterFunc(n.randomTimeout(), n.onElectionTimeout)
 	return n
@@ -92,6 +112,60 @@ func (n *RaftNode) Term() uint64 {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	return n.currentTerm
+}
+
+// IsLeader answers the qn "whether this node is the current leader ?"
+func (n *RaftNode) IsLeader() bool {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.state == Leader
+}
+
+// LeaderAddr returns the Raft RPC address of the current known leader
+// returns "" if this node is the leader or the leader is unknown
+func (n *RaftNode) LeaderAddr() string {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if n.state == Leader {
+		return "" // I am the leader
+	}
+	return n.leaderID
+}
+
+// ApplyCh returns the channel on which committed log entries are delivered
+// the caller (main.go) must drain this channel continuously
+func (n *RaftNode) ApplyCh() <-chan LogEntry {
+	return n.applyCh
+}
+
+// ErrNotLeader is returned by propose when this node is not the leader
+var ErrNotLeader = fmt.Errorf("raft: not leader")
+
+// propose submits a command to the Raft log
+// blocks until the entry is committed and applied, then returns
+// returns ErrNotLeader if this node is not the leader
+func (n *RaftNode) Propose(cmd []byte) error {
+	n.mu.Lock()
+	if n.state != Leader {
+		n.mu.Unlock()
+		return ErrNotLeader
+	}
+	idx := n.appendEntry(n.currentTerm, cmd)
+	n.mu.Unlock()
+
+	// wait until the entry at idx is applied to the state machine
+	// apply loop signals via applyCh we watch commitIndex instead
+	// of a per index channel to stay simple
+	for {
+		n.mu.Lock()
+		applied := n.lastApplied
+		n.mu.Unlock()
+		if applied >= idx {
+			return nil
+		}
+		// small sleep to yield a production impl would use a cond var or per index channel
+		time.Sleep(1 * time.Millisecond)
+	}
 }
 
 //randomTimeout returns a duration in [electionTimeoutMin, electionTimeoutMax)

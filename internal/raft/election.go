@@ -93,4 +93,3 @@ func (n *RaftNode) becomeLeader() {
 	peers := n.peers
 	go n.runLeaderLoop(term, peers)
 }
-

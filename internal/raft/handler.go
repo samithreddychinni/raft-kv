@@ -45,9 +45,10 @@ func (n *RaftNode) HandleRequestVote(args RequestVoteArgs) RequestVoteReply {
 // HandleAppendEntries processes an incoming AppendEntries RPC from a Leader
 //
 // decision map:
-//   1)args.Term < currentTerm  to stale leader, reject
-//   2)args.Term >= currentTerm to valid leader; revert to Follower if needed (Higher Term / Discovers Leader rules)
-//                                 reset election timer
+//
+//	1)args.Term < currentTerm  to stale leader, reject
+//	2)args.Term >= currentTerm to valid leader; revert to Follower if needed (Higher Term / Discovers Leader rules)
+//	                              reset election timer
 func (n *RaftNode) HandleAppendEntries(args AppendEntriesArgs) AppendEntriesReply {
 	n.mu.Lock()
 	defer n.mu.Unlock()
