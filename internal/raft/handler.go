@@ -43,35 +43,78 @@ func (n *RaftNode) HandleRequestVote(args RequestVoteArgs) RequestVoteReply {
 }
 
 // HandleAppendEntries processes an incoming AppendEntries RPC from a Leader
-//
-// decision map:
-//
-//	1)args.Term < currentTerm  to stale leader, reject
-//	2)args.Term >= currentTerm to valid leader; revert to Follower if needed (Higher Term / Discovers Leader rules)
-//	                              reset election timer
 func (n *RaftNode) HandleAppendEntries(args AppendEntriesArgs) AppendEntriesReply {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 
-	reply := AppendEntriesReply{Term: n.currentTerm}
+	reply := AppendEntriesReply{Term: n.currentTerm, Success: false}
 
 	// stale leader
 	if args.Term < n.currentTerm {
 		return reply
 	}
 
-	// Higher term or valid leader discovered — two diagram transitions collapse here:
-	//   Candidate to Follower (discovers valid leader with term >= currentTerm)
-	//   Leader to Follower (discovers higher term)
+	// Higher term or valid leader discovered
 	if args.Term > n.currentTerm || n.state != Follower {
 		n.becomeFollower(args.Term)
 	} else {
 		// same term, already Follower: then just reset the timer
 		n.resetElectionTimer()
 	}
-
-	log.Printf("[%s] heartbeat ← %s  term=%d", n.id, args.LeaderID, args.Term)
 	reply.Term = n.currentTerm
+
+	// 1)log consistency check (PrevLog check)
+	if args.PrevLogIndex > 0 {
+		entry, ok := n.entryAt(args.PrevLogIndex)
+		if !ok {
+			//we dont have this index at all
+			reply.ConflictIndex = uint64(len(n.raftLog))
+			reply.ConflictTerm = 0
+			return reply
+		}
+		if entry.Term != args.PrevLogTerm {
+			//term mismatch, fast backward to first index of conflicting term
+			reply.ConflictTerm = entry.Term
+			reply.ConflictIndex = args.PrevLogIndex
+			for reply.ConflictIndex > 1 {
+				prevEntry, _ := n.entryAt(reply.ConflictIndex - 1)
+				if prevEntry.Term != entry.Term {
+					break
+				}
+				reply.ConflictIndex--
+			}
+			return reply
+		}
+	}
+
+	// 2)conflict resolution and append
+	for i, newEntry := range args.Entries {
+		existingEntry, ok := n.entryAt(newEntry.Index)
+		if ok && existingEntry.Term != newEntry.Term {
+			//conflict:-truncate log from this index
+			n.truncateFrom(newEntry.Index)
+			ok = false //force append for this and remaining
+		}
+		if !ok {
+			//append all remaining new entries
+			for _, e := range args.Entries[i:] {
+				n.appendEntry(e.Term, e.Command)
+			}
+			break
+		}
+	}
+
+	//3)update commit index
+	if args.LeaderCommit > n.commitIndex {
+		lastNewIndex := n.lastIndex()
+		if args.LeaderCommit < lastNewIndex {
+			n.commitIndex = args.LeaderCommit
+		} else {
+			n.commitIndex = lastNewIndex
+		}
+		n.applyCommitted()
+	}
+
 	reply.Success = true
 	return reply
 }

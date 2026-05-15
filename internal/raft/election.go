@@ -88,6 +88,14 @@ func (n *RaftNode) becomeLeader() {
 	n.electionTimer.Stop() // leaders don't time out into candidates
 	log.Printf("[%s] → Leader  term=%d", n.id, n.currentTerm)
 
+	n.nextIndex = make(map[string]uint64)
+	n.matchIndex = make(map[string]uint64)
+	nextIdx := n.lastIndex() + 1
+	for _, p := range n.peers {
+		n.nextIndex[p.ID] = nextIdx
+		n.matchIndex[p.ID] = 0
+	}
+
 	// capture term for the goroutine; avoids holding the lock in the loop
 	term := n.currentTerm
 	peers := n.peers

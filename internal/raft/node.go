@@ -64,6 +64,9 @@ type RaftNode struct {
 	// apply channel: committed entries flow here for the store to consume
 	applyCh chan LogEntry
 
+	// wakeLoopCh is used to immediately wake the leader loop on new proposals
+	wakeLoopCh chan struct{}
+
 	// leader-only: per-peer replication bookkeeping
 	nextIndex  map[string]uint64 // next log index to send to each peer
 	matchIndex map[string]uint64 // highest index confirmed replicated on each peer
@@ -78,8 +81,9 @@ func NewRaftNode(id, addr string, peers []Peer) *RaftNode {
 		id:    id,
 		addr:  addr,
 		peers: peers,
-		state: Follower,
-		applyCh: make(chan LogEntry, 256),
+		state:      Follower,
+		applyCh:    make(chan LogEntry, 256),
+		wakeLoopCh: make(chan struct{}, 1),
 	}
 	n.initLog()
 	
@@ -151,6 +155,12 @@ func (n *RaftNode) Propose(cmd []byte) error {
 		return ErrNotLeader
 	}
 	idx := n.appendEntry(n.currentTerm, cmd)
+	
+	// wake the leader loop to replicate immediately
+	select {
+	case n.wakeLoopCh <- struct{}{}:
+	default:
+	}
 	n.mu.Unlock()
 
 	// wait until the entry at idx is applied to the state machine
@@ -299,5 +309,17 @@ func (n *RaftNode) handleConn(conn net.Conn) {
 		reply := n.HandleAppendEntries(args)
 		replyBody, _ = encode(reply)
 		enc.Encode(envelope{Type: MsgAppendEntriesReply, Body: replyBody})
+	}
+}
+
+// applyCommitted sends committed entries to applyCh
+// must be called with n.mu held
+func (n *RaftNode) applyCommitted() {
+	for n.commitIndex > n.lastApplied {
+		n.lastApplied++
+		entry, ok := n.entryAt(n.lastApplied)
+		if ok {
+			n.applyCh <- entry
+		}
 	}
 }
