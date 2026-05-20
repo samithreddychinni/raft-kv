@@ -15,6 +15,7 @@ func (n *RaftNode) startElection() {
 	n.currentTerm++
 	n.votedFor = n.id // vote for self (one vote per term)
 	n.votes = 1
+	n.persistMeta() // term and vote changed must be durable before RPCs fly
 	n.resetElectionTimer() // restart timer in case we don't win (Candidate to Candidate)
 
 	term := n.currentTerm

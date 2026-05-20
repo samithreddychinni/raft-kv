@@ -33,6 +33,7 @@ func (n *RaftNode) HandleRequestVote(args RequestVoteArgs) RequestVoteReply {
 	// AND the candidate's log is at least as up-to-date as ours.
 	if (n.votedFor == "" || n.votedFor == args.CandidateID) && candidateLogOK {
 		n.votedFor = args.CandidateID
+		n.persistMeta() // votedFor changed must be durable before we reply
 		n.resetElectionTimer() // a real leader will appear soon; reset timer
 		reply.VoteGranted = true
 		reply.Term = n.currentTerm

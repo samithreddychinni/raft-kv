@@ -19,6 +19,7 @@ func main() {
 	peerAddr := flag.String("peer-addr", ":9001", "TCP address for peer traffic")
 	raftAddr := flag.String("raft-addr", ":9101", "TCP address for Raft RPC traffic")
 	peersFlag := flag.String("peers", "", "peer list: id=peerAddr=raftAddr,...")
+	dataDir := flag.String("data-dir", "data", "directory for durable Raft state (*.raft.meta, *.raft.log)")
 	flag.Parse()
 
 	var peerNodes []peer.Peer
@@ -41,8 +42,8 @@ func main() {
 	n := peer.NewNode(*id, *peerAddr, peerNodes)
 	n.Start()
 
-	// start Raft node (leader election + heartbeats)
-	rn := raft.NewRaftNode(*id, *raftAddr, raftPeers)
+	// start Raft node (leader election + heartbeats + persistence)
+	rn := raft.NewRaftNode(*id, *raftAddr, raftPeers, *dataDir)
 	rn.Start()
 
 	// start key-value store backed by WAL

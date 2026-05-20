@@ -40,9 +40,13 @@ type RaftNode struct {
 	addr string
 	peers []Peer
 
-	// persistent state (must survive restarts, simplified for now)
+	// Durable state storage — nil only in unit-test stubs that call NewRaftNode
+	// with an empty dataDir.
+	persister *Persister
+
+	// persistent state on paper (§5.4 — must survive crashes)
 	currentTerm uint64
-	votedFor    string // if "" means not voted in currentTerm
+	votedFor    string // "" = no vote cast in this term
 
 	// 	volatile state
 	state         RaftState
@@ -75,19 +79,54 @@ type RaftNode struct {
 	leaderID string
 }
 
-//NewRaftNode creates a raftnode that starts as a follower
-func NewRaftNode(id, addr string, peers []Peer) *RaftNode {
+// NewRaftNode creates a raftnode that starts as a follower.
+// dataDir is the directory where the two durable state files will live
+// (<dataDir>/<id>.raft.meta and <dataDir>/<id>.raft.log).
+// Pass "" only in unit tests that do not need persistence.
+func NewRaftNode(id, addr string, peers []Peer, dataDir string) *RaftNode {
 	n := &RaftNode{
-		id:    id,
-		addr:  addr,
-		peers: peers,
+		id:         id,
+		addr:       addr,
+		peers:      peers,
 		state:      Follower,
 		applyCh:    make(chan LogEntry, 256),
 		wakeLoopCh: make(chan struct{}, 1),
 	}
+
+	//initialise the sentinel log entry; may be overwritten by recovery below.
 	n.initLog()
-	
-	//timer fires once then We restart it with a new random duration every time
+
+	if dataDir != "" {
+		p, err := NewPersister(dataDir, id)
+		if err != nil {
+			log.Fatalf("[%s] open persister: %v", id, err)
+		}
+		n.persister = p
+
+		recovered, err := p.LoadState()
+		if err != nil {
+			log.Fatalf("[%s] load persisted state: %v", id, err)
+		}
+
+		// Restore HardState.
+		n.currentTerm = recovered.HardState.CurrentTerm
+		n.votedFor = recovered.HardState.VotedFor
+
+		// Restore log (append recovered entries after the sentinel).
+		if len(recovered.Log) > 0 {
+			n.raftLog = append(n.raftLog, recovered.Log...)
+			last := n.raftLog[len(n.raftLog)-1]
+			n.lastLogIndex = last.Index
+			n.lastLogTerm = last.Term
+		}
+
+		if n.currentTerm > 0 || n.votedFor != "" || n.lastLogIndex > 0 {
+			log.Printf("[%s] recovered: term=%d votedFor=%q logLen=%d lastIdx=%d",
+				id, n.currentTerm, n.votedFor, len(n.raftLog)-1, n.lastLogIndex)
+		}
+	}
+
+	// Timer fires once; reset with a new random duration every time it fires.
 	n.electionTimer = time.AfterFunc(n.randomTimeout(), n.onElectionTimeout)
 	return n
 }
@@ -201,8 +240,26 @@ func (n *RaftNode) becomeFollower(term uint64) {
 	n.state = Follower
 	n.currentTerm = term
 	n.votedFor = ""
+	n.persistMeta() // term + votedFor changed [persist before any reply)
 	n.resetElectionTimer()
 	log.Printf("[%s] → Follower  term=%d", n.id, n.currentTerm)
+}
+
+// persistMeta durably saves the current HardState (currentTerm + votedFor).
+//must be called with n.mu held, immediately after mutating either field and
+//before sending the corresponding RPC reply.
+func (n *RaftNode) persistMeta() {
+	if n.persister == nil {
+		return // unit-test path no persistence
+	}
+	if err := n.persister.SaveHardState(HardState{
+		CurrentTerm: n.currentTerm,
+		VotedFor:    n.votedFor,
+	}); err != nil {
+		// treat persistence failure as fatal: returning a reply without having
+		// durably written the state could violate election safety.
+		log.Fatalf("[%s] FATAL: persist HardState: %v", n.id, err)
+	}
 }
 
 // onElectionTimeout is fired by the election timer goroutine
