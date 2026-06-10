@@ -375,7 +375,7 @@ func (n *RaftNode) applyCommitted() {
 	for n.commitIndex > n.lastApplied {
 		n.lastApplied++
 		entry, ok := n.entryAt(n.lastApplied)
-		if ok {
+		if ok && len(entry.Command) > 0 { // skip no-op entries (nil command)
 			n.applyCh <- entry
 		}
 	}

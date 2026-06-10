@@ -15,7 +15,7 @@ func (n *RaftNode) startElection() {
 	n.currentTerm++
 	n.votedFor = n.id // vote for self (one vote per term)
 	n.votes = 1
-	n.persistMeta() // term and vote changed must be durable before RPCs fly
+	n.persistMeta()        // term and vote changed must be durable before RPCs fly
 	n.resetElectionTimer() // restart timer in case we don't win (Candidate to Candidate)
 
 	term := n.currentTerm
@@ -91,6 +91,22 @@ func (n *RaftNode) becomeLeader() {
 
 	n.nextIndex = make(map[string]uint64)
 	n.matchIndex = make(map[string]uint64)
+
+	// append a no-op entry in the new leader's term.
+	//
+	// a new leader may have log entries from a previous term that are
+	// replicated on a majority but were never committed (the old leader
+	// crashed before advancing commitIndex).  Raft's commit rule says a
+	// leader can only commit an entry by counting replicas of an entry from
+	// its *current* term.  Without a current-term entry to piggyback on,
+	// those old entries could sit uncommitted for the entire tenure of this
+	// leader +or get incorrectly committed by a later leader
+	//
+	// appending a no-op immediately gives us a current-term entry to
+	// replicate.  once the no-op commits, advanceCommitIndex advances past
+	// it and safely commits all preceding entries from prior terms.
+	n.appendEntry(n.currentTerm, nil)
+
 	nextIdx := n.lastIndex() + 1
 	for _, p := range n.peers {
 		n.nextIndex[p.ID] = nextIdx
