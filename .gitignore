@@ -1,0 +1,13 @@
+# compiled binaries
+/raftkvd
+/cmd/raftkvd/raftkvd
+
+# runtime state (per-node WAL + durable raft state)
+*.wal
+/data/
+
+# logs
+*.log
+
+# local working notes
+notes.md
