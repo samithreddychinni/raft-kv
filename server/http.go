@@ -47,6 +47,24 @@ func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleGet(w http.ResponseWriter, r *http.Request) {
 	key := r.PathValue("key")
+
+	// linearizable read: only the leader serves, and only after ReadIndex confirms
+	if !s.raft.IsLeader() {
+		w.Header().Set("X-Raft-Leader", s.raft.LeaderAddr())
+		http.Error(w, "not the leader", http.StatusServiceUnavailable)
+		return
+	}
+	if _, err := s.raft.ReadIndex(); err != nil {
+		if err == raft.ErrNotLeader {
+			w.Header().Set("X-Raft-Leader", s.raft.LeaderAddr())
+			http.Error(w, "not the leader", http.StatusServiceUnavailable)
+			return
+		}
+		// ErrReadTimeout or other: cannot guarantee linearizability right now.
+		http.Error(w, fmt.Sprintf("read unavailable: %v", err), http.StatusServiceUnavailable)
+		return
+	}
+
 	value, ok := s.store.Get(key)
 	if !ok {
 		http.Error(w, "didnt found key", http.StatusNotFound)
