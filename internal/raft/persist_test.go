@@ -243,6 +243,7 @@ func TestRaftNode_PersistenceSurvivesRestart(t *testing.T) {
 	id := "n1"
 
 	n := NewRaftNode(id, ":0", nil, dir)
+	t.Cleanup(n.Stop)
 	n.mu.Lock()
 	n.startElection()
 	n.mu.Unlock()
@@ -258,9 +259,11 @@ func TestRaftNode_PersistenceSurvivesRestart(t *testing.T) {
 	wantLastIdx := n.lastLogIndex
 	n.mu.Unlock()
 
-	n.persister.Close() // abrupt shutdown, no Stop()
+	n.Stop()
+	n.persister.Close() // abrupt shutdown
 
 	n2 := NewRaftNode(id, ":0", nil, dir)
+	t.Cleanup(n2.Stop)
 
 	n2.mu.Lock()
 	gotTerm := n2.currentTerm

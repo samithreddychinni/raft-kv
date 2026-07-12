@@ -36,8 +36,8 @@ type RaftNode struct {
 	mu sync.Mutex
 
 	//identification values for node
-	id   string
-	addr string
+	id    string
+	addr  string
 	peers []Peer
 
 	// Durable state storage — nil only in unit-test stubs that call NewRaftNode
@@ -68,12 +68,13 @@ type RaftNode struct {
 	// apply channel: committed entries flow here for the store to consume
 	applyCh chan LogEntry
 
-	// wakeLoopCh is used to immediately wake the leader loop on new proposals
-	wakeLoopCh chan struct{}
-
 	// leader-only: per-peer replication bookkeeping
-	nextIndex  map[string]uint64 // next log index to send to each peer
-	matchIndex map[string]uint64 // highest index confirmed replicated on each peer
+	nextIndex           map[string]uint64 // next log index to send to each peer
+	matchIndex          map[string]uint64 // highest index confirmed replicated on each peer
+	replicationTriggers map[string]chan struct{}
+	replicationStopCh   chan struct{}
+	replicationWG       sync.WaitGroup
+	appendEntriesRPC    func(string, uint8, []byte, any) error
 
 	// current known leader (may be empty if unknown)
 	leaderID string
@@ -85,12 +86,12 @@ type RaftNode struct {
 // Pass "" only in unit tests that do not need persistence.
 func NewRaftNode(id, addr string, peers []Peer, dataDir string) *RaftNode {
 	n := &RaftNode{
-		id:         id,
-		addr:       addr,
-		peers:      peers,
-		state:      Follower,
-		applyCh:    make(chan LogEntry, 256),
-		wakeLoopCh: make(chan struct{}, 1),
+		id:      id,
+		addr:    addr,
+		peers:   peers,
+		state:   Follower,
+		applyCh: make(chan LogEntry, 256),
+		appendEntriesRPC: sendRPC,
 	}
 
 	//initialise the sentinel log entry; may be overwritten by recovery below.
@@ -140,6 +141,7 @@ func (n *RaftNode) Start() {
 func (n *RaftNode) Stop() {
 	n.mu.Lock()
 	defer n.mu.Unlock()
+	n.stopReplicationWorkers()
 	n.electionTimer.Stop()
 }
 
@@ -194,12 +196,8 @@ func (n *RaftNode) Propose(cmd []byte) error {
 		return ErrNotLeader
 	}
 	idx := n.appendEntry(n.currentTerm, cmd)
-	
-	// wake the leader loop to replicate immediately
-	select {
-	case n.wakeLoopCh <- struct{}{}:
-	default:
-	}
+
+	n.notifyReplicationWorkers()
 	n.mu.Unlock()
 
 	// wait until the entry at idx is applied to the state machine
@@ -237,6 +235,7 @@ func (n *RaftNode) resetElectionTimer() {
 //   2) Leader to Follower (discovers higher term)
 // must be called with n.mu held
 func (n *RaftNode) becomeFollower(term uint64) {
+	n.stopReplicationWorkers()
 	n.state = Follower
 	n.currentTerm = term
 	n.votedFor = ""

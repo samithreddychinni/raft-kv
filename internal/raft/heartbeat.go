@@ -1,41 +1,71 @@
 // heartbeat: Leader loop that sends AppendEntries with actual log entries
 package raft
 
-import (
-	"time"
-)
+import "time"
 
-// runLeaderLoop fires replication RPCs every heartbeatInterval or when woken by Propose
-func (n *RaftNode) runLeaderLoop(leaderTerm uint64, peers []Peer) {
+//leader loop wakes every peer worker on a heartbeat.
+func (n *RaftNode) runLeaderLoop(leaderTerm uint64, stop <-chan struct{}) {
 	ticker := time.NewTicker(heartbeatInterval)
 	defer ticker.Stop()
 
+	n.signalReplicationWorkers(leaderTerm)
 	for {
-		n.mu.Lock()
-		if n.state != Leader || n.currentTerm != leaderTerm {
-			n.mu.Unlock()
-			return
-		}
-		term := n.currentTerm
-		n.mu.Unlock()
-
-		for _, p := range peers {
-			go n.sendAppendEntries(p, term)
-		}
-
 		select {
 		case <-ticker.C:
-		case <-n.wakeLoopCh:
+			n.signalReplicationWorkers(leaderTerm)
+		case <-stop:
+			return
 		}
 	}
 }
 
-// sendAppendEntries sends log entries to a peer and processes the reply
-func (n *RaftNode) sendAppendEntries(p Peer, leaderTerm uint64) {
+func (n *RaftNode) signalReplicationWorkers(leaderTerm uint64) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if n.state != Leader || n.currentTerm != leaderTerm {
+		return
+	}
+	n.notifyReplicationWorkers()
+}
+
+//must be called with n.mu held.
+func (n *RaftNode) notifyReplicationWorkers() {
+	for _, trigger := range n.replicationTriggers {
+		select {
+		case trigger <- struct{}{}:
+		default:
+		}
+	}
+}
+
+//must be called with n.mu held.
+func (n *RaftNode) stopReplicationWorkers() {
+	if n.replicationStopCh != nil {
+		close(n.replicationStopCh)
+		n.replicationStopCh = nil
+	}
+	n.replicationTriggers = nil
+}
+
+//one worker per follower keeps one AppendEntries RPC in flight.
+func (n *RaftNode) runReplicationWorker(p Peer, leaderTerm uint64, trigger <-chan struct{}, stop <-chan struct{}) {
+	for {
+		select {
+		case <-stop:
+			return
+		case <-trigger:
+			for n.sendAppendEntries(p, leaderTerm) {
+			}
+		}
+	}
+}
+
+//returns true when a conflict needs another RPC right away.
+func (n *RaftNode) sendAppendEntries(p Peer, leaderTerm uint64) bool {
 	n.mu.Lock()
 	if n.state != Leader || n.currentTerm != leaderTerm {
 		n.mu.Unlock()
-		return
+		return false
 	}
 
 	nextIdx := n.nextIndex[p.ID]
@@ -66,12 +96,16 @@ func (n *RaftNode) sendAppendEntries(p Peer, leaderTerm uint64) {
 
 	body, err := encode(args)
 	if err != nil {
-		return
+		return false
 	}
 
+	send := n.appendEntriesRPC
+	if send == nil {
+		send = sendRPC
+	}
 	var reply AppendEntriesReply
-	if err := sendRPC(p.Addr, MsgAppendEntries, body, &reply); err != nil {
-		return
+	if err := send(p.Addr, MsgAppendEntries, body, &reply); err != nil {
+		return false
 	}
 
 	n.mu.Lock()
@@ -79,11 +113,11 @@ func (n *RaftNode) sendAppendEntries(p Peer, leaderTerm uint64) {
 
 	if reply.Term > n.currentTerm {
 		n.becomeFollower(reply.Term)
-		return
+		return false
 	}
 
 	if n.state != Leader || n.currentTerm != leaderTerm {
-		return
+		return false
 	}
 
 	if reply.Success {
@@ -91,9 +125,15 @@ func (n *RaftNode) sendAppendEntries(p Peer, leaderTerm uint64) {
 		if match > n.matchIndex[p.ID] {
 			n.matchIndex[p.ID] = match
 			n.nextIndex[p.ID] = match + 1
+			previousCommitIndex := n.commitIndex
 			n.advanceCommitIndex()
+			if n.commitIndex > previousCommitIndex {
+				n.notifyReplicationWorkers()
+			}
 		}
+		return n.nextIndex[p.ID] <= n.lastIndex()
 	} else {
+		previousNextIndex := n.nextIndex[p.ID]
 		//fast backward logic
 		if reply.ConflictTerm > 0 {
 			lastConflictIndex := uint64(0)
@@ -115,6 +155,7 @@ func (n *RaftNode) sendAppendEntries(p Peer, leaderTerm uint64) {
 				n.nextIndex[p.ID]--
 			}
 		}
+		return n.nextIndex[p.ID] < previousNextIndex
 	}
 }
 
@@ -127,14 +168,14 @@ func (n *RaftNode) advanceCommitIndex() {
 		if !ok || e.Term != n.currentTerm {
 			continue //check docs/raft-uncommitted-log-overwrite-seq.png
 		}
-		
+
 		matchCount := 1 // self
 		for _, p := range n.peers {
 			if n.matchIndex[p.ID] >= nToTest {
 				matchCount++
 			}
 		}
-		
+
 		clusterSize := len(n.peers) + 1
 		quorum := clusterSize/2 + 1
 		if matchCount >= quorum {

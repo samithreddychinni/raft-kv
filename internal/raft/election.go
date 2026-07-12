@@ -113,8 +113,20 @@ func (n *RaftNode) becomeLeader() {
 		n.matchIndex[p.ID] = 0
 	}
 
-	// capture term for the goroutine; avoids holding the lock in the loop
+	n.replicationTriggers = make(map[string]chan struct{}, len(n.peers))
+	n.replicationStopCh = make(chan struct{})
+
 	term := n.currentTerm
 	peers := n.peers
-	go n.runLeaderLoop(term, peers)
+	stop := n.replicationStopCh
+	for _, p := range peers {
+		trigger := make(chan struct{}, 1)
+		n.replicationTriggers[p.ID] = trigger
+		n.replicationWG.Add(1)
+		go func(p Peer, trigger <-chan struct{}) {
+			defer n.replicationWG.Done()
+			n.runReplicationWorker(p, term, trigger, stop)
+		}(p, trigger)
+	}
+	go n.runLeaderLoop(term, stop)
 }
