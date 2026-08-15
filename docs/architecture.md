@@ -15,6 +15,9 @@ I built this to understand exactly how you get a bunch of independent nodes to a
 4.  **the state machine**: A simple in-memory map. It only updates when Raft successfully reaches a consensus majority.
 5.  **the durability (wal)**: The write-ahead log. If a write isn't `fsync`'d to this file, it's not considered "committed."
 
+6.  **snapshots**: Each node saves the key-value state after 1,024 applied Raft entries.
+    The node then removes those entries from its Raft log.
+
 ---
 
 ## the lifecycle of a write
@@ -34,6 +37,15 @@ When you send a `SET` request, here is how it survives the journey:
 I spent a lot of time on the failure cases. If the leader crashes mid-write, the cluster might be in a "torn" state. When a new leader takes over, it forces its own log onto everyone else. This ensures that even if nodes are crashing and restarting, there is only ever one version of the truth.
 
 ![log overwrite](images/raft-uncommitted-log-overwrite-seq.png)
+
+## snapshots and compaction
+
+Raft logs can grow without a limit. RaftKV saves a snapshot after 1,024 applied entries.
+The snapshot contains the key-value state, the last included index, and the last included term.
+The node keeps only later Raft log entries.
+A leader sends the snapshot when a follower needs removed entries.
+Snapshot transfer uses one RPC. Large snapshots can use too much memory.
+Add chunked transfer when snapshot size requires it.
 
 ---
 

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sort"
 	"sync"
 
 	"github.com/samithreddychinni/raftkv/internal/raft"
@@ -91,6 +92,37 @@ func (s *Store) GetAll() map[string]string {
 	return copy
 }
 
+// Snapshot returns a complete, consistent image of the key-value state.
+func (s *Store) Snapshot() ([]byte, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return json.Marshal(s.items)
+}
+
+// RestoreSnapshot replaces the in-memory state with a snapshot image.
+func (s *Store) RestoreSnapshot(data []byte) error {
+	items := make(map[string]string)
+	if err := json.Unmarshal(data, &items); err != nil {
+		return fmt.Errorf("store: decode snapshot: %w", err)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	keys := make([]string, 0, len(items))
+	for key := range items {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	entries := make([]wal.Entry, 0, len(keys))
+	for _, key := range keys {
+		entries = append(entries, wal.Entry{Op: wal.OpSet, Key: key, Value: items[key]})
+	}
+	if err := s.log.Replace(entries); err != nil {
+		return fmt.Errorf("store: replace WAL from snapshot: %w", err)
+	}
+	s.items = items
+	return nil
+}
+
 func (s *Store) Get(key string) (string, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -99,21 +131,21 @@ func (s *Store) Get(key string) (string, bool) {
 }
 
 func (s *Store) Set(key, value string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if err := s.log.AppendSet(key, value); err != nil { //WAL write first
 		return err
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.items[key] = value
 	return nil
 }
 
 func (s *Store) Delete(key string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if err := s.log.AppendDelete(key); err != nil { //WAL write first
 		return err
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	delete(s.items, key)
 	return nil
 }
@@ -125,7 +157,7 @@ func (s *Store) Close() error {
 // cmd is the command encoded inside a raft.LogEntry.Command
 // the HTTP handler encodes this apply decodes it
 type Cmd struct {
-	Op    string `json:"op"`    //"set"or"delete"
+	Op    string `json:"op"` //"set"or"delete"
 	Key   string `json:"key"`
 	Value string `json:"value"` //empty for delete
 }

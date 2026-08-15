@@ -13,6 +13,8 @@ import (
 	"github.com/samithreddychinni/raftkv/server"
 )
 
+const snapshotInterval = 1024
+
 func main() {
 	id := flag.String("id", "node1", "unique node ID")
 	httpAddr := flag.String("http", ":8080", "HTTP listen address")
@@ -42,10 +44,6 @@ func main() {
 	n := peer.NewNode(*id, *peerAddr, peerNodes)
 	n.Start()
 
-	// start Raft node (leader election + heartbeats + persistence)
-	rn := raft.NewRaftNode(*id, *raftAddr, raftPeers, *dataDir)
-	rn.Start()
-
 	// start key-value store backed by WAL
 	walPath := *id + ".wal"
 	s, err := store.NewStoreFromWAL(walPath)
@@ -55,7 +53,12 @@ func main() {
 	}
 	defer s.Close()
 
+	// Restore the store snapshot before the Raft node accepts RPCs.
+	rn := raft.NewRaftNodeWithSnapshot(*id, *raftAddr, raftPeers, *dataDir, s.RestoreSnapshot)
+	rn.Start()
+
 	srv := server.NewServer(s, rn)
+	lastSnapshotIndex := rn.SnapshotIndex()
 
 	// apply loop: drains committed Raft entries and applies them to the store.
 	// runs on both leader and follower same code path.
@@ -63,6 +66,20 @@ func main() {
 		for entry := range rn.ApplyCh() {
 			if err := s.Apply(entry); err != nil {
 				fmt.Fprintf(os.Stderr, "apply error: %v\n", err)
+				continue
+			}
+			rn.Applied(entry.Index)
+			if entry.Index-lastSnapshotIndex >= snapshotInterval {
+				data, err := s.Snapshot()
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "snapshot error: %v\n", err)
+					continue
+				}
+				if err := rn.Compact(entry.Index, data); err != nil {
+					fmt.Fprintf(os.Stderr, "compact error: %v\n", err)
+				} else {
+					lastSnapshotIndex = entry.Index
+				}
 			}
 		}
 	}()

@@ -1,13 +1,15 @@
 // rpc: on wire structs for RequestVote and AppendEntries RPCs
 package raft
 
-//MsgType constants extend the peer transport's MsgType enum
+// MsgType constants extend the peer transport's MsgType enum
 // values start at 10 to avoid collision with peer.MsGPing/MsgPong
 const (
-	MsgRequestVote  uint8 = 10
-	MsgRequestVoteReply  uint8 = 11
-	MsgAppendEntries  uint8 = 12
-	MsgAppendEntriesReply uint8 = 13
+	MsgRequestVote          uint8 = 10
+	MsgRequestVoteReply     uint8 = 11
+	MsgAppendEntries        uint8 = 12
+	MsgAppendEntriesReply   uint8 = 13
+	MsgInstallSnapshot      uint8 = 14
+	MsgInstallSnapshotReply uint8 = 15
 )
 
 // RequestVoteArgs is sent by a candidate to ask/solicit votes
@@ -31,23 +33,37 @@ type RequestVoteReply struct {
 type AppendEntriesArgs struct {
 	Term         uint64
 	LeaderID     string
-	PrevLogIndex uint64 // index of entry immediately before new ones
-	PrevLogTerm  uint64 // term of that entry
+	PrevLogIndex uint64     // index of entry immediately before new ones
+	PrevLogTerm  uint64     // term of that entry
 	Entries      []LogEntry // empty slice = heartbeat
-	LeaderCommit uint64 // leader's current commitIndex
+	LeaderCommit uint64     // leader's current commitIndex
 }
 
-//LogEntry is a single command in the replicated log
+// LogEntry is a single command in the replicated log
 type LogEntry struct {
 	Index   uint64
 	Term    uint64
 	Command []byte // opcode + key + value, encoded by the leader
 }
 
-//AppendEntriesReply lets the leader detect a higher term and step down
+// AppendEntriesReply lets the leader detect a higher term and step down
 type AppendEntriesReply struct {
-	Term    uint64
-	Success bool
+	Term          uint64
+	Success       bool
 	ConflictIndex uint64 // first index of the conflicting term (fast catch-up hint)
 	ConflictTerm  uint64 // term at that index; 0 if follower log is too short
+}
+
+// InstallSnapshotArgs replaces a follower's state through LastIncludedIndex.
+type InstallSnapshotArgs struct {
+	Term              uint64
+	LeaderID          string
+	LastIncludedIndex uint64
+	LastIncludedTerm  uint64
+	Data              []byte
+}
+
+type InstallSnapshotReply struct {
+	Term    uint64
+	Success bool
 }

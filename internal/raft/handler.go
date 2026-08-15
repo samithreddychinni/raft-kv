@@ -33,7 +33,7 @@ func (n *RaftNode) HandleRequestVote(args RequestVoteArgs) RequestVoteReply {
 	// AND the candidate's log is at least as up-to-date as ours.
 	if (n.votedFor == "" || n.votedFor == args.CandidateID) && candidateLogOK {
 		n.votedFor = args.CandidateID
-		n.persistMeta() // votedFor changed must be durable before we reply
+		n.persistMeta()        // votedFor changed must be durable before we reply
 		n.resetElectionTimer() // a real leader will appear soon; reset timer
 		reply.VoteGranted = true
 		reply.Term = n.currentTerm
@@ -49,7 +49,6 @@ func (n *RaftNode) HandleAppendEntries(args AppendEntriesArgs) AppendEntriesRepl
 	defer n.mu.Unlock()
 
 	reply := AppendEntriesReply{Term: n.currentTerm, Success: false}
-
 	// stale leader
 	if args.Term < n.currentTerm {
 		return reply
@@ -63,13 +62,16 @@ func (n *RaftNode) HandleAppendEntries(args AppendEntriesArgs) AppendEntriesRepl
 		n.resetElectionTimer()
 	}
 	reply.Term = n.currentTerm
+	if n.installingSnapshot {
+		return reply
+	}
 
 	// 1)log consistency check (PrevLog check)
 	if args.PrevLogIndex > 0 {
 		entry, ok := n.entryAt(args.PrevLogIndex)
 		if !ok {
 			//we dont have this index at all
-			reply.ConflictIndex = uint64(len(n.raftLog))
+			reply.ConflictIndex = n.raftLog[0].Index + 1
 			reply.ConflictTerm = 0
 			return reply
 		}

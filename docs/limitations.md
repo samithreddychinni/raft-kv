@@ -4,30 +4,20 @@ RaftKV is a project for understanding distributed systems. To keep the core logi
 
 ---
 
-## 1. linearizable reads
-
-`GET` requests are served from the local node's in-memory state. A follower can return stale data if it hasn't yet applied the latest committed entries.
-
-To be strictly linearizable, the leader must confirm it is still the leader (via a read-index or lease-read quorum check) before returning any read result. This is deferred.
-
----
-
-## 2. resource leaks
-
-### goroutine management
-The leader spawns a new goroutine for every replication attempt. If a peer is down, these pile up waiting for a network timeout.
-*   **The Fix**: a worker pool or dedicated replication manager per peer.
+## 1. connection setup
 
 ### connection pooling
 Every heartbeat/append opens a fresh TCP connection.
-*   **The Fix**: persistent TCP connections with reused gob encoders/decoders.
+Use persistent TCP connections when connection setup affects latency or CPU use.
 
 ---
 
-## 3. feature gaps
+## 2. feature gaps
 
-### log compaction
-The log grows indefinitely. Production systems use snapshots to discard applied entries.
+### state WAL compaction
+The key-value WAL compacts when a node restores a snapshot.
+A running node keeps all applied commands in its WAL.
+Compact the state WAL during normal operation when disk use becomes a problem.
 
 ### cluster membership changes
 Peers are fixed at startup. §6 joint consensus for dynamic membership is not implemented.
@@ -38,6 +28,22 @@ No authentication or TLS. Development/learning use only.
 ---
 
 ## resolved
+
+### ~~linearizable reads~~
+
+`GET /key/{key}` runs only on the leader. The leader confirms a quorum before it returns a value.
+The server returns `503 Service Unavailable` when it cannot confirm leadership.
+
+### ~~replication worker growth~~
+
+Each leader starts one replication worker for each follower. Each worker permits one AppendEntries RPC at a time.
+The workers stop when the node loses leadership.
+
+### ~~Raft log compaction~~
+
+Each node stores a snapshot after it applies 1,024 log entries.
+The snapshot contains the key-value state and Raft log position.
+The leader sends this snapshot to a follower that needs compacted entries. Snapshot transfer uses one RPC.
 
 ### ~~the persistence gap (§5.4)~~
 ~~`currentTerm` and `votedFor` stay in memory.~~

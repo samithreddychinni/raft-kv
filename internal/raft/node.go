@@ -10,6 +10,7 @@ import (
 	"math/rand"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -25,13 +26,13 @@ const (
 	dialTimeout = 500 * time.Millisecond
 )
 
-//peer is a remote node the raftnode communicates with
+// peer is a remote node the raftnode communicates with
 type Peer struct {
 	ID   string
 	Addr string
 }
 
-//raftnode is the state machine. All exported methods are safe for concurrent use
+// raftnode is the state machine. All exported methods are safe for concurrent use
 type RaftNode struct {
 	mu sync.Mutex
 
@@ -59,7 +60,8 @@ type RaftNode struct {
 	lastLogTerm  uint64
 
 	// in-memory Raft log; index 0 is a zero-entry sentinel
-	raftLog []LogEntry
+	raftLog  []LogEntry
+	snapshot Snapshot
 
 	// replicated state machine indices
 	commitIndex uint64 // highest index known committed
@@ -75,6 +77,10 @@ type RaftNode struct {
 	replicationStopCh   chan struct{}
 	replicationWG       sync.WaitGroup
 	appendEntriesRPC    func(string, uint8, []byte, any) error
+	installSnapshotRPC  func(string, uint8, []byte, any) error
+	restoreSnapshot     func([]byte) error
+	installingSnapshot  bool
+	stateApplied        atomic.Uint64
 
 	// current known leader (may be empty if unknown)
 	leaderID string
@@ -85,13 +91,25 @@ type RaftNode struct {
 // (<dataDir>/<id>.raft.meta and <dataDir>/<id>.raft.log).
 // Pass "" only in unit tests that do not need persistence.
 func NewRaftNode(id, addr string, peers []Peer, dataDir string) *RaftNode {
+	return newRaftNode(id, addr, peers, dataDir, nil)
+}
+
+// NewRaftNodeWithSnapshot restores a state-machine snapshot before the node
+// accepts RPCs. The caller must provide a restore function when dataDir is set.
+func NewRaftNodeWithSnapshot(id, addr string, peers []Peer, dataDir string, restore func([]byte) error) *RaftNode {
+	return newRaftNode(id, addr, peers, dataDir, restore)
+}
+
+func newRaftNode(id, addr string, peers []Peer, dataDir string, restore func([]byte) error) *RaftNode {
 	n := &RaftNode{
-		id:      id,
-		addr:    addr,
-		peers:   peers,
-		state:   Follower,
-		applyCh: make(chan LogEntry, 256),
-		appendEntriesRPC: sendRPC,
+		id:                 id,
+		addr:               addr,
+		peers:              peers,
+		state:              Follower,
+		applyCh:            make(chan LogEntry, 256),
+		appendEntriesRPC:   sendRPC,
+		installSnapshotRPC: sendRPC,
+		restoreSnapshot:    restore,
 	}
 
 	//initialise the sentinel log entry; may be overwritten by recovery below.
@@ -113,7 +131,25 @@ func NewRaftNode(id, addr string, peers []Peer, dataDir string) *RaftNode {
 		n.currentTerm = recovered.HardState.CurrentTerm
 		n.votedFor = recovered.HardState.VotedFor
 
-		// Restore log (append recovered entries after the sentinel).
+		if recovered.Snapshot.LastIncludedIndex > 0 {
+			n.snapshot = recovered.Snapshot
+			n.raftLog = []LogEntry{{
+				Index: recovered.Snapshot.LastIncludedIndex,
+				Term:  recovered.Snapshot.LastIncludedTerm,
+			}}
+			n.commitIndex = recovered.Snapshot.LastIncludedIndex
+			n.lastApplied = recovered.Snapshot.LastIncludedIndex
+			n.stateApplied.Store(recovered.Snapshot.LastIncludedIndex)
+			n.lastLogIndex = recovered.Snapshot.LastIncludedIndex
+			n.lastLogTerm = recovered.Snapshot.LastIncludedTerm
+			if n.restoreSnapshot != nil {
+				if err := n.restoreSnapshot(recovered.Snapshot.Data); err != nil {
+					log.Fatalf("[%s] restore snapshot: %v", id, err)
+				}
+			}
+		}
+
+		// Restore log entries after the snapshot base.
 		if len(recovered.Log) > 0 {
 			n.raftLog = append(n.raftLog, recovered.Log...)
 			last := n.raftLog[len(n.raftLog)-1]
@@ -130,6 +166,16 @@ func NewRaftNode(id, addr string, peers []Peer, dataDir string) *RaftNode {
 	// Timer fires once; reset with a new random duration every time it fires.
 	n.electionTimer = time.AfterFunc(n.randomTimeout(), n.onElectionTimeout)
 	return n
+}
+
+// Applied reports that the state machine has durably applied index.
+func (n *RaftNode) Applied(index uint64) {
+	for {
+		current := n.stateApplied.Load()
+		if index <= current || n.stateApplied.CompareAndSwap(current, index) {
+			return
+		}
+	}
 }
 
 // Start opens the RPC listener
@@ -215,24 +261,26 @@ func (n *RaftNode) Propose(cmd []byte) error {
 	}
 }
 
-//randomTimeout returns a duration in [electionTimeoutMin, electionTimeoutMax)
-//called every time the timer resets to avoid coordinated split votes 
-//[look at https://raft.github.io/raft.pdf Section 5.2 to learn more]
+// randomTimeout returns a duration in [electionTimeoutMin, electionTimeoutMax)
+// called every time the timer resets to avoid coordinated split votes
+// [look at https://raft.github.io/raft.pdf Section 5.2 to learn more]
 func (n *RaftNode) randomTimeout() time.Duration {
 	delta := electionTimeoutMax - electionTimeoutMin
 	return electionTimeoutMin + time.Duration(rand.Int63n(int64(delta)))
 }
 
-//resetElectionTimer resets the timer with a new random duration.
-//must be called with n.mu held.
+// resetElectionTimer resets the timer with a new random duration.
+// must be called with n.mu held.
 func (n *RaftNode) resetElectionTimer() {
 	n.electionTimer.Stop()
 	n.electionTimer.Reset(n.randomTimeout())
 }
 
 // becomeFollower transitions this node to Follower
-//   1)Candidate to Follower (discovers leader OR higher term)
-//   2) Leader to Follower (discovers higher term)
+//
+//	1)Candidate to Follower (discovers leader OR higher term)
+//	2) Leader to Follower (discovers higher term)
+//
 // must be called with n.mu held
 func (n *RaftNode) becomeFollower(term uint64) {
 	n.stopReplicationWorkers()
@@ -245,8 +293,8 @@ func (n *RaftNode) becomeFollower(term uint64) {
 }
 
 // persistMeta durably saves the current HardState (currentTerm + votedFor).
-//must be called with n.mu held, immediately after mutating either field and
-//before sending the corresponding RPC reply.
+// must be called with n.mu held, immediately after mutating either field and
+// before sending the corresponding RPC reply.
 func (n *RaftNode) persistMeta() {
 	if n.persister == nil {
 		return // unit-test path no persistence
@@ -262,7 +310,7 @@ func (n *RaftNode) persistMeta() {
 }
 
 // onElectionTimeout is fired by the election timer goroutine
-//Follower to Candidate (election timeout)
+// Follower to Candidate (election timeout)
 func (n *RaftNode) onElectionTimeout() {
 	n.mu.Lock()
 	defer n.mu.Unlock()
@@ -310,7 +358,7 @@ func sendRPC(addr string, msgType uint8, body []byte, reply any) error {
 	return gob.NewDecoder(bytes.NewReader(respEnv.Body)).Decode(reply)
 }
 
-//envelope is our minimal transport frame
+// envelope is our minimal transport frame
 type envelope struct {
 	Type uint8
 	Body []byte
@@ -365,6 +413,15 @@ func (n *RaftNode) handleConn(conn net.Conn) {
 		reply := n.HandleAppendEntries(args)
 		replyBody, _ = encode(reply)
 		enc.Encode(envelope{Type: MsgAppendEntriesReply, Body: replyBody})
+
+	case MsgInstallSnapshot:
+		var args InstallSnapshotArgs
+		if err := gob.NewDecoder(bytes.NewReader(env.Body)).Decode(&args); err != nil {
+			return
+		}
+		reply := n.HandleInstallSnapshot(args)
+		replyBody, _ = encode(reply)
+		enc.Encode(envelope{Type: MsgInstallSnapshotReply, Body: replyBody})
 	}
 }
 

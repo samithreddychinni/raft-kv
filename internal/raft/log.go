@@ -21,10 +21,15 @@ func (n *RaftNode) lastTerm() uint64 {
 
 // entryAt returns the log entry at the given index, or false if out of range.
 func (n *RaftNode) entryAt(index uint64) (LogEntry, bool) {
-	if index >= uint64(len(n.raftLog)) {
+	base := n.raftLog[0].Index
+	if index < base {
 		return LogEntry{}, false
 	}
-	return n.raftLog[index], true
+	offset := index - base
+	if offset >= uint64(len(n.raftLog)) {
+		return LogEntry{}, false
+	}
+	return n.raftLog[offset], true
 }
 
 // appendEntry appends a new entry to the in-memory log and persists it to disk.
@@ -52,10 +57,15 @@ func (n *RaftNode) appendEntry(term uint64, cmd []byte) uint64 {
 // log and the on-disk log file.
 // Must be called with n.mu held.
 func (n *RaftNode) truncateFrom(idx uint64) {
-	if idx >= uint64(len(n.raftLog)) {
+	base := n.raftLog[0].Index
+	if idx <= base {
 		return
 	}
-	n.raftLog = n.raftLog[:idx]
+	offset := idx - base
+	if offset >= uint64(len(n.raftLog)) {
+		return
+	}
+	n.raftLog = n.raftLog[:offset]
 	last := n.raftLog[len(n.raftLog)-1]
 	n.lastLogIndex = last.Index
 	n.lastLogTerm = last.Term

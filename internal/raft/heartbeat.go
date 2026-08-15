@@ -3,7 +3,7 @@ package raft
 
 import "time"
 
-//leader loop wakes every peer worker on a heartbeat.
+// leader loop wakes every peer worker on a heartbeat.
 func (n *RaftNode) runLeaderLoop(leaderTerm uint64, stop <-chan struct{}) {
 	ticker := time.NewTicker(heartbeatInterval)
 	defer ticker.Stop()
@@ -28,7 +28,7 @@ func (n *RaftNode) signalReplicationWorkers(leaderTerm uint64) {
 	n.notifyReplicationWorkers()
 }
 
-//must be called with n.mu held.
+// must be called with n.mu held.
 func (n *RaftNode) notifyReplicationWorkers() {
 	for _, trigger := range n.replicationTriggers {
 		select {
@@ -38,7 +38,7 @@ func (n *RaftNode) notifyReplicationWorkers() {
 	}
 }
 
-//must be called with n.mu held.
+// must be called with n.mu held.
 func (n *RaftNode) stopReplicationWorkers() {
 	if n.replicationStopCh != nil {
 		close(n.replicationStopCh)
@@ -47,7 +47,7 @@ func (n *RaftNode) stopReplicationWorkers() {
 	n.replicationTriggers = nil
 }
 
-//one worker per follower keeps one AppendEntries RPC in flight.
+// one worker per follower keeps one AppendEntries RPC in flight.
 func (n *RaftNode) runReplicationWorker(p Peer, leaderTerm uint64, trigger <-chan struct{}, stop <-chan struct{}) {
 	for {
 		select {
@@ -60,7 +60,7 @@ func (n *RaftNode) runReplicationWorker(p Peer, leaderTerm uint64, trigger <-cha
 	}
 }
 
-//returns true when a conflict needs another RPC right away.
+// returns true when a conflict needs another RPC right away.
 func (n *RaftNode) sendAppendEntries(p Peer, leaderTerm uint64) bool {
 	n.mu.Lock()
 	if n.state != Leader || n.currentTerm != leaderTerm {
@@ -69,6 +69,10 @@ func (n *RaftNode) sendAppendEntries(p Peer, leaderTerm uint64) bool {
 	}
 
 	nextIdx := n.nextIndex[p.ID]
+	if nextIdx <= n.snapshot.LastIncludedIndex {
+		n.mu.Unlock()
+		return n.sendInstallSnapshot(p, leaderTerm)
+	}
 	prevLogIndex := nextIdx - 1
 	prevLogTerm := uint64(0)
 	if prevEntry, ok := n.entryAt(prevLogIndex); ok {
@@ -157,6 +161,50 @@ func (n *RaftNode) sendAppendEntries(p Peer, leaderTerm uint64) bool {
 		}
 		return n.nextIndex[p.ID] < previousNextIndex
 	}
+}
+
+func (n *RaftNode) sendInstallSnapshot(p Peer, leaderTerm uint64) bool {
+	n.mu.Lock()
+	if n.state != Leader || n.currentTerm != leaderTerm || n.snapshot.LastIncludedIndex == 0 {
+		n.mu.Unlock()
+		return false
+	}
+	args := InstallSnapshotArgs{
+		Term:              leaderTerm,
+		LeaderID:          n.id,
+		LastIncludedIndex: n.snapshot.LastIncludedIndex,
+		LastIncludedTerm:  n.snapshot.LastIncludedTerm,
+		Data:              append([]byte(nil), n.snapshot.Data...),
+	}
+	n.mu.Unlock()
+
+	body, err := encode(args)
+	if err != nil {
+		return false
+	}
+	send := n.installSnapshotRPC
+	if send == nil {
+		send = sendRPC
+	}
+	var reply InstallSnapshotReply
+	if err := send(p.Addr, MsgInstallSnapshot, body, &reply); err != nil {
+		return false
+	}
+
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if reply.Term > n.currentTerm {
+		n.becomeFollower(reply.Term)
+		return false
+	}
+	if !reply.Success || n.state != Leader || n.currentTerm != leaderTerm {
+		return false
+	}
+	if n.matchIndex[p.ID] < args.LastIncludedIndex {
+		n.matchIndex[p.ID] = args.LastIncludedIndex
+		n.nextIndex[p.ID] = args.LastIncludedIndex + 1
+	}
+	return n.nextIndex[p.ID] <= n.lastIndex()
 }
 
 // advanceCommitIndex checks if a majority of followers have replicated new entries

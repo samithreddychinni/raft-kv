@@ -27,3 +27,6 @@ The client should parse this header and retry the request against the leader's a
 ## latency & linearizability
 
 Write requests block until the command is replicated to a majority and flushed to the disk. A `201 Created` response is a guarantee that the data is persistent and consistent across the cluster.
+
+`GET /key/{name}` runs only on the leader. The leader confirms a quorum before it returns a value.
+The server returns `503 Service Unavailable` when it cannot confirm leadership.
